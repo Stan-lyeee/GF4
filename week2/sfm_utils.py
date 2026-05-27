@@ -15,6 +15,7 @@ from typing import Iterable
 
 import cv2
 import numpy as np
+import matplotlib.pyplot as plt
 
 
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff"}
@@ -147,16 +148,20 @@ def detect_sift_features(
     - If OpenCV returns slightly more than max_features, keep only the first
       max_features keypoints and matching descriptor rows.
     """
-    image_gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+
+    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+
     sift = cv2.SIFT_create(nfeatures=max_features)
-    kp, des = sift.detectAndCompute(image_gray, None)
+    kp, des = sift.detectAndCompute(gray,None)
+
     if des is None:
-        return kp, np.zeros((0,128))
+        return [], np.empty((0, 128), dtype=np.float32)
     
-    if len(kp) > max_features:
-        kp = kp[:max_features]
-        des = des[:max_features]
+    kp = kp[:max_features]
+    des = des[:max_features]    
+    
     return kp, des
+
 
 def precompute_image_features(
     image_paths: list[Path],
@@ -170,15 +175,19 @@ def precompute_image_features(
     Dataset mode should use this function so SIFT is not recomputed for the
     same image in every pair.
     """
-    image_features = []
-    for path in image_paths:
-        image = load_image(path,max_image_size)
-        keypoints, descriptors = detect_sift_features(image, max_features)
-        image_features.append(
-            ImageFeatures(path, image, keypoints, descriptors)
+    features = []
+    for image_path in image_paths:
+        image = load_image(image_path, max_size=max_image_size)
+        keypoints, descriptors = detect_sift_features(image, max_features=max_features)
+        features.append(
+            ImageFeatures(
+                path=Path(image_path),
+                image=image,
+                keypoints=keypoints,
+                descriptors=descriptors,
+            )
         )
-    
-    return image_features
+    return features
 
 
 def raw_descriptor_matches(desc1: np.ndarray, desc2: np.ndarray) -> list[cv2.DMatch]:
@@ -193,13 +202,12 @@ def raw_descriptor_matches(desc1: np.ndarray, desc2: np.ndarray) -> list[cv2.DMa
       each descriptor in image 1.
     - Return the matches sorted by descriptor distance.
     """
-    if len(desc1) == 0 or len(desc2) == 0:
+    if desc1 is None or desc2 is None or len(desc1) == 0 or len(desc2) == 0:
         return []
 
-    bf = cv2.BFMatcher(cv2.NORM_L2)
-    matches = bf.match(desc1, desc2)
-    matches = sorted(matches, key=lambda x:x.distance)
-    return matches
+    matcher = cv2.BFMatcher(cv2.NORM_L2)
+    matches = matcher.match(desc1, desc2)
+    return sorted(matches, key=lambda match: match.distance)
 
 
 def match_descriptors(
@@ -217,17 +225,23 @@ def match_descriptors(
     - Use knnMatch(desc1, desc2, k=2) for the ratio test.
     - Keep a match when best_distance < ratio * second_best_distance.
     """
-    if len(desc1) == 0 or len(desc2) == 0:
+
+    if desc1 is None or desc2 is None or len(desc1) == 0 or len(desc2) == 0:
         return []
-    
-    bf = cv2.BFMatcher(cv2.NORM_L2)
-    matches = bf.knnMatch(desc1, desc2, k=2)
-    good = []
-    for m, n in matches:
-        if m.distance < ratio * n.distance:
-            good.append(m)
-    
-    return good
+
+    matcher = cv2.BFMatcher(cv2.NORM_L2)
+    knn_matches = matcher.knnMatch(desc1, desc2, k=2)
+
+    good_matches = []
+    for candidates in knn_matches:
+        if len(candidates) < 2:
+            continue
+        best, second_best = candidates
+        if best.distance < ratio * second_best.distance:
+            good_matches.append(best)
+
+    return sorted(good_matches, key=lambda match: match.distance)
+
 
 def count_raw_matches(desc1: np.ndarray, desc2: np.ndarray) -> int:
     """Return the number of descriptors that can be matched before filtering.
@@ -251,14 +265,9 @@ def matched_keypoint_coords(
 
     Remember: cv2.KeyPoint.pt is (x, y), not (row, column).
     """
-    points1 = []
-    points2 = []
-
-    for match in matches:
-        points1.append(keypoints1[match.queryIdx].pt)
-        points2.append(keypoints2[match.trainIdx].pt)
-    
-    return np.array(points1), np.array(points2)
+    pts1 = np.array([keypoints1[match.queryIdx].pt for match in matches], dtype=np.float64)
+    pts2 = np.array([keypoints2[match.trainIdx].pt for match in matches], dtype=np.float64)
+    return pts1.reshape(-1, 2), pts2.reshape(-1, 2)
 
 
 def estimate_fundamental_ransac(
@@ -275,21 +284,23 @@ def estimate_fundamental_ransac(
     - F: 3x3 fundamental matrix
     - inlier_mask: boolean array of shape (N,)
     """
-    if len(pts1) < 8 or len(pts2) < 8:
-        return np.empty((0,0)), np.zeros(len(pts1), dtype=bool)
+    if len(pts1) < 8:
+        raise ValueError("At least 8 matched points are required to estimate F")
 
     F, inlier_mask = cv2.findFundamentalMat(
-        pts1,
-        pts2,
-        cv2.FM_RANSAC,
-        threshold,
-        confidence
-    )
+                     pts1,
+                     pts2,
+                     method=cv2.FM_RANSAC,
+                     ransacReprojThreshold=threshold,
+                     confidence=confidence,
+                 )
 
     if F is None or inlier_mask is None:
-        return np.empty((0,0)), np.zeros(len(pts1), dtype=bool)
+        raise ValueError("Fundamental matrix estimation failed")
 
+    #Conver inlier_mask to a list of Boolean value
     return F, inlier_mask.ravel().astype(bool)
+
 
 def compute_epipolar_errors(
     F: np.ndarray,
@@ -303,16 +314,19 @@ def compute_epipolar_errors(
     For each point x1 in image 1, compute the epipolar line l2 = F x1.
     Then compute the distance from the corresponding x2 to l2.
     """
-    homogeneous_pts1 = np.column_stack([pts1, np.ones(len(pts1))])
-    homogeneous_pts2 = np.column_stack([pts2, np.ones(len(pts2))])
 
-    lines2 = (F @ homogeneous_pts1.T).T
+    if len(pts1) == 0:
+        return np.empty((0,), dtype=np.float64)
+    if pts1.shape != pts2.shape or pts1.shape[1] != 2:
+        raise ValueError("pts1 and pts2 must both have shape (N, 2)")
 
-    numerators = np.abs(np.sum(lines2 * homogeneous_pts2,axis = 1))
-    denominators = np.sqrt(lines2[:, 0]**2 + lines2[:,1]**2)
+    pts1_h = np.column_stack([pts1, np.ones(len(pts1))])
+    pts2_h = np.column_stack([pts2, np.ones(len(pts2))])
+    lines2 = (F @ pts1_h.T).T
 
-    return numerators/denominators
-
+    numerators = np.abs(np.sum(lines2 * pts2_h, axis=1))
+    denominators = np.linalg.norm(lines2[:, :2], axis=1)
+    return numerators / np.maximum(denominators, np.finfo(float).eps)
 
 
 def draw_keypoints(
@@ -374,47 +388,67 @@ def draw_epipolar_lines(
     - Draw the corresponding x2 point on image 2.
     - A simple Matplotlib figure with image1 and image2 side by side is enough.
     """
-    import matplotlib.pyplot as plt
-
     ensure_dir(output_path.parent)
 
-    if len(pts1) == 0 or len(pts2) == 0:
-        return
+    if len(pts1) == 0:
+        raise ValueError("At least one point correspondence is required")
+
+    #Selects evenly spaced match indices from the full list, 
+    #instead of just taking the first few
+    sample_count = min(max_lines, len(pts1))
+    sample_indices = np.linspace(0, len(pts1) - 1, sample_count, dtype=int)
+    sample_pts1 = pts1[sample_indices]
+    sample_pts2 = pts2[sample_indices]
+
+    pts1_h = np.column_stack([sample_pts1, np.ones(sample_count)])
+    lines2 = (F @ pts1_h.T).T
+
+    height1, width1 = image1.shape[:2]
+    height2, width2 = image2.shape[:2]
+    canvas_height = max(height1, height2)
+    canvas_width = width1 + width2
+    canvas = np.zeros((canvas_height, canvas_width, 3), dtype=np.uint8)
+    canvas[:height1, :width1] = image1
+    canvas[:height2, width1:] = image2
+
+    color_values = plt.cm.tab20(np.linspace(0, 1, sample_count))[:, :3]
+    #reverses RGB to BGR
+    colors = [
+        tuple(int(channel * 255) for channel in color[::-1])
+        for color in color_values
+    ]
     
-    count = min(max_lines, len(pts1), len(pts2))
-    sampled_pts1 = pts1[:count]
-    sampled_pts2 = pts2[:count]
+    #Converts the image 1 point from floating-point coordinates to integer pixel coordinates.
+    for point1, point2, line2, color in zip(sample_pts1, sample_pts2, lines2, colors):
+        p1 = (int(round(point1[0])), int(round(point1[1])))
+        p2 = (int(round(point2[0])) + width1, int(round(point2[1])))
 
-    homogeneous_pts1 = np.column_stack([sampled_pts1, np.ones(count)])
-    lines2 = (F @ homogeneous_pts1.T).T
+        a, b, c = line2
+        if abs(b) > np.finfo(float).eps:
+            x0 = 0
+            y0 = int(round(-(a * x0 + c) / b))
+            x1 = width2 - 1
+            y1 = int(round(-(a * x1 + c) / b))
+        else:
+            x0 = int(round(-c / a)) if abs(a) > np.finfo(float).eps else 0
+            y0 = 0
+            x1 = x0
+            y1 = height2 - 1
 
-    _, width2 = image2.shape[:2]
-    image1_rgb = cv2.cvtColor(image1, cv2.COLOR_BGR2RGB)
-    image2_rgb = cv2.cvtColor(image2, cv2.COLOR_BGR2RGB)
+        clipped, line_start, line_end = cv2.clipLine((0, 0, width2, height2), (x0, y0), (x1, y1))
+        #clipped is True if the line intersects the image rectangle. It is False if the line is completely outside the image.
+        if clipped:
+            line_start = (line_start[0] + width1, line_start[1])
+            line_end = (line_end[0] + width1, line_end[1])
+            cv2.line(canvas, line_start, line_end, color, thickness=2, lineType=cv2.LINE_AA)
 
-    fig, axes = plt.subplots(1, 2, figsize = (12,6))
-    axes[0].imshow(image1_rgb)
-    axes[0].scatter(sampled_pts1[:,0], sampled_pts1[:,1], c="yellow")
-    axes[0].set_title("keypoints in image 1")
-    axes[0].axis("off")
+        #white outline + coloured centre
+        for point in (p1, p2):
+            cv2.circle(canvas, point, 6, (255, 255, 255), thickness=2, lineType=cv2.LINE_AA)
+            cv2.circle(canvas, point, 4, color, thickness=-1, lineType=cv2.LINE_AA)
 
-    axes[1].imshow(image2_rgb)
-    axes[1].scatter(sampled_pts2[:,0], sampled_pts2[:,1], c = "purple")
+    cv2.imwrite(str(output_path), canvas)
 
-    for a,b,c in lines2:
-        if abs(b) < 1e-10:
-            continue
-
-        x = np.array([0,width2 - 1])
-        y = -(a * x + c)/b
-        axes[1].plot(x,y, linewidth=1)
-
-    axes[1].set_title("Image 2 epipolar lines")
-    axes[1].axis("off")
-
-    plt.tight_layout()
-    plt.savefig(output_path)
-    plt.close(fig)
 
 def analyse_image_pair(
     image1_path: Path,
@@ -439,18 +473,17 @@ def analyse_image_pair(
     7. Save keypoint, raw-match, filtered-match, inlier, and epipolar-line figures.
     8. Return a PairAnalysis object.
     """
-    features = precompute_image_features(
+    features1, features2 = precompute_image_features(
         [image1_path, image2_path],
         max_features=max_features,
-        max_image_size=max_image_size
+        max_image_size=max_image_size,
     )
-
     return analyse_feature_pair(
-        features[0],
-        features[1],
-        output_dir,
-        ratio = ratio,
-        save_figures = save_figures
+        features1=features1,
+        features2=features2,
+        output_dir=output_dir,
+        ratio=ratio,
+        save_figures=save_figures,
     )
 
 def analyse_feature_pair(
@@ -469,104 +502,103 @@ def analyse_feature_pair(
     return metrics without creating an output folder for every image pair.
     """
     raw_matches = raw_descriptor_matches(features1.descriptors, features2.descriptors)
-    filtered_matches = match_descriptors(features1.descriptors, features2.descriptors, ratio)
+    matches = match_descriptors(features1.descriptors, features2.descriptors, ratio=ratio)
 
-    pts1, pts2 = matched_keypoint_coords(features1.keypoints, features2.keypoints, filtered_matches)
+    F = None
+    inlier_mask = np.zeros((len(matches),), dtype=bool)
+    all_errors = np.empty((0,), dtype=np.float64)
+    inlier_errors = np.empty((0,), dtype=np.float64)
 
-    F, inlier_mask = estimate_fundamental_ransac(pts1, pts2)
+    if len(matches) >= 8:
+        pts1, pts2 = matched_keypoint_coords(features1.keypoints, features2.keypoints, matches)
+        try:
+            F, inlier_mask = estimate_fundamental_ransac(pts1, pts2)
+            all_errors = compute_epipolar_errors(F, pts1, pts2)
+            inlier_errors = all_errors[inlier_mask]
+        except ValueError:
+            F = None
 
-    valid_F = F is not None and F.shape == (3,3)
+    ransac_inliers = int(np.count_nonzero(inlier_mask))
+    inlier_ratio = ransac_inliers / len(matches) if matches else 0.0
+    inlier_matches = [
+        match for match, is_inlier in zip(matches, inlier_mask) if is_inlier
+    ]
 
-    if valid_F and len(filtered_matches) > 0:
-        epipolar_errors = compute_epipolar_errors(F, pts1, pts2)
-    else:
-        epipolar_errors = np.array([])
-
-    if len(epipolar_errors) > 0:
-        inlier_errors = epipolar_errors[inlier_mask]
-    else:
-        inlier_errors = np.array([])
-
-    ransac_inliers = int(np.sum(inlier_mask))
-
-    if len(filtered_matches) > 0:
-        inlier_ratio = ransac_inliers / len(filtered_matches)
-    else:
-        inlier_ratio = 0
-    
     if save_figures:
         ensure_dir(output_dir)
-
         draw_keypoints(
             features1.image,
             features1.keypoints,
-            output_dir / "keypoints_1.png"
+            output_dir / f"{features1.path.stem}_keypoints.jpg",
         )
-        
         draw_keypoints(
             features2.image,
             features2.keypoints,
-            output_dir / "keypoints_2.png"
+            output_dir / f"{features2.path.stem}_keypoints.jpg",
         )
-
         draw_matches(
             features1.image,
             features1.keypoints,
             features2.image,
             features2.keypoints,
             raw_matches,
-            output_dir / "raw_matches.png"
+            output_dir / "raw_matches.jpg",
         )
-
         draw_matches(
             features1.image,
             features1.keypoints,
             features2.image,
             features2.keypoints,
-            filtered_matches,
-            output_dir / "filtered_matches.png"
+            matches,
+            output_dir / "filtered_matches.jpg",
         )
-
-        inlier_matches = []
-        for match, is_inlier in zip(filtered_matches, inlier_mask):
-            if is_inlier:
-                inlier_matches.append(match)
-
         draw_matches(
             features1.image,
             features1.keypoints,
             features2.image,
             features2.keypoints,
             inlier_matches,
-            output_dir / "inlier_matches.png"
+            output_dir / "ransac_inlier_matches.jpg",
         )
-
-        if valid_F and ransac_inliers > 0:
+        if F is not None and ransac_inliers > 0:
+            pts1, pts2 = matched_keypoint_coords(
+                features1.keypoints,
+                features2.keypoints,
+                matches,
+            )
             draw_epipolar_lines(
                 features1.image,
                 features2.image,
                 pts1[inlier_mask],
                 pts2[inlier_mask],
                 F,
-                output_dir / "epipolar_lines.png"
+                output_dir / "epipolar_lines.jpg",
+                max_lines=20,
             )
-    
+
     return PairAnalysis(
         image_i=features1.path.name,
         image_j=features2.path.name,
         keypoints_i=len(features1.keypoints),
         keypoints_j=len(features2.keypoints),
         raw_matches=len(raw_matches),
-        filtered_matches=len(filtered_matches),
+        filtered_matches=len(matches),
         ransac_inliers=ransac_inliers,
         inlier_ratio=inlier_ratio,
-        mean_epipolar_error_all=float(np.mean(epipolar_errors)) if len(epipolar_errors) > 0 else None,
-        median_epipolar_error_all=float(np.median(epipolar_errors)) if len(epipolar_errors) > 0 else None,
-        mean_epipolar_error_inliers=float(np.mean(inlier_errors)) if len(inlier_errors) > 0 else None,
-        median_epipolar_error_inliers=float(np.median(inlier_errors)) if len(inlier_errors) > 0 else None,
-        max_epipolar_error_inliers=float(np.max(inlier_errors)) if len(inlier_errors) > 0 else None,
-        fundamental_matrix=F.tolist() if valid_F else None
+        mean_epipolar_error_all=float(np.mean(all_errors)) if len(all_errors) else None,
+        median_epipolar_error_all=float(np.median(all_errors)) if len(all_errors) else None,
+        mean_epipolar_error_inliers=(
+            float(np.mean(inlier_errors)) if len(inlier_errors) else None
+        ),
+        median_epipolar_error_inliers=(
+            float(np.median(inlier_errors)) if len(inlier_errors) else None
+        ),
+        max_epipolar_error_inliers=(
+            float(np.max(inlier_errors)) if len(inlier_errors) else None
+        ),
+        fundamental_matrix=F.tolist() if F is not None else None,
     )
+
 
 def draw_match_graph(
     rows: list[dict],
@@ -577,8 +609,6 @@ def draw_match_graph(
 
     Edges with fewer than min_inliers are omitted to keep the graph readable.
     """
-    import matplotlib.pyplot as plt
-
     ensure_dir(output_path.parent)
 
     nodes = sorted({row["image_i"] for row in rows} | {row["image_j"] for row in rows})
