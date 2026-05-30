@@ -3,7 +3,7 @@
 ## Next Sessions
 
 - 21 May: LR 11
-- 25 May: Bank Holiday. I will be available in my office (BE4-54) on 26 May between 3-4pm if you have questions. 
+- 25 May: Bank Holiday. I will be available in my office (BE4-54) on 26 May between 3-4pm if you have questions.
 - 28 May: LR 11
 
 ## Compulsory Sessions
@@ -52,11 +52,14 @@ The project culminates in a short group presentation and an individual final rep
 
 - recovering relative camera rotation and translation
 - triangulating sparse 3D points
-- visualising reconstructed sparse points and camera poses
+- registering a third image using 2D-3D correspondences and PnP
+- visualising reconstructed sparse points and multiple camera poses
+- detailed guide: [week3/README.md](week3/README.md)
 
 ### Week 4
 
-- analysing failure cases
+- extending the sparse reconstruction to a small image sequence
+- comparing with COLMAP and analysing failure cases
 - preparing and delivering final presentation and report
 
 ## Coursework
