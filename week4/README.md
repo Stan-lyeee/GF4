@@ -38,6 +38,21 @@ The important requirement is that your choices are explained and supported by ev
 
 ---
 
+## AI use policy
+
+You may use AI tools to help you learn the background material, understand the concepts, and interpret documentation. For example, you may use AI to ask:
+
+- what OpenCV functions return,
+- what COLMAP terms such as registered images, sparse points, camera poses, and reprojection error mean.
+
+You may **not** use AI tools for algorithmic development. This includes using AI to design, write, edit, fix, debug, test, or diagnose the SfM pipeline code. In particular, do not use AI to implement or debug image selection, feature matching, geometric verification, triangulation, 2D-3D correspondence construction, PnP registration, reprojection-error computation, point filtering, or COLMAP comparison metrics. The algorithmic implementation you submit must be developed and debugged by your group.
+
+For Week 4, you **may** use AI tools to help with visualisations for communication. For example, AI may help you think about figure layout, plot readability, colour choices, captions, slide composition, or non-algorithmic plotting/styling. 
+
+Any use of AI tools must be clearly mentioned in your final report.
+
+---
+
 ## Evidence to produce
 
 By the end of Week 4, your group should have:
