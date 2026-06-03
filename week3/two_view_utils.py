@@ -127,7 +127,16 @@ def estimate_essential_matrix(
     TODO: Complete this function.
 
     """
-    raise NotImplementedError("TODO: estimate essential matrix")
+
+    E, mask = cv2.findEssentialMat(
+        pts1,
+        pts2,
+        K,
+        cv2.RANSAC,
+        confidence,
+        threshold,
+    )
+    return E, mask.ravel().astype(bool)
 
 
 def recover_relative_pose(
@@ -142,8 +151,11 @@ def recover_relative_pose(
     TODO: Complete this function.
 
     """
-    raise NotImplementedError("TODO: recover relative pose")
+    if inlier_mask is not None:
+        inlier_mask = np.asarray(inlier_mask).reshape(-1, 1).astype(np.uint8)
+    retval, R, t, pose_mask = cv2.recoverPose(E, pts1, pts2, K, mask=inlier_mask)
 
+    return R, t, pose_mask.ravel().astype(bool)
 
 def make_projection_matrices(
     K: np.ndarray,
@@ -154,7 +166,10 @@ def make_projection_matrices(
 
     TODO: Complete this function.
     """
-    raise NotImplementedError("TODO: create projection matrices")
+    P1 = K @ np.hstack([np.eye(3), np.zeros((3, 1))])
+    P2 = K @ np.hstack([R, t.reshape(3, 1)])
+
+    return P1, P2
 
 
 def triangulate_points(
@@ -169,8 +184,17 @@ def triangulate_points(
     TODO: Complete this function.
 
     """
-    raise NotImplementedError("TODO: triangulate 3D points")
+    if len(pts1) == 0:
+        return np.empty((0,3))
+    
+    pts1 = np.asarray(pts1, dtype=np.float64).reshape(-1, 2)
+    pts2 = np.asarray(pts2, dtype=np.float64).reshape(-1, 2)
+    P1, P2 = make_projection_matrices(K, R, t)
+    
+    points_homogeneous = cv2.triangulatePoints(P1, P2, pts1.T, pts2.T)
+    points3d = (points_homogeneous[:3] / points_homogeneous[3]).T
 
+    return points3d
 
 def project_points(
     points3d: np.ndarray,
@@ -182,8 +206,16 @@ def project_points(
 
     TODO: Complete this function.
     """
-    raise NotImplementedError("TODO: project 3D points")
 
+    if len(points3d) == 0:
+        return np.empty((0,2))
+    
+    t = np.asarray(t, dtype=np.float64).reshape(3, 1)
+
+    points_cam = R @ points3d.T + t
+    points_img = K @ points_cam
+    projected_points = (points_img[:2] / points_img[2]).T
+    return projected_points
 
 def compute_reprojection_errors(
     points3d: np.ndarray,
@@ -197,8 +229,12 @@ def compute_reprojection_errors(
     TODO: Complete this function by projecting points3d and comparing with
     observed_pts.
     """
-    raise NotImplementedError("TODO: compute reprojection errors")
 
+    points3d = np.asarray(points3d, dtype=np.float64).reshape(-1, 3)
+    observed_pts = np.asarray(observed_pts, dtype=np.float64).reshape(-1, 2)
+
+    projected_points =  project_points(points3d, K, R, t)
+    return np.linalg.norm(projected_points - observed_pts, axis=1)
 
 def compute_depths(
     points3d: np.ndarray,
@@ -211,7 +247,11 @@ def compute_depths(
 
     Camera 1 has extrinsics [I|0]. Camera 2 has extrinsics [R|t].
     """
-    raise NotImplementedError("TODO: compute point depths")
+
+    depth1 = points3d[:,2]
+    depth2 = (R @ points3d.T + t).T
+
+    return depth1, depth2[:,2]
 
 
 def filter_reconstructed_points(
@@ -231,7 +271,12 @@ def filter_reconstructed_points(
     - have positive depth in both cameras,
     - have reprojection error at most max_reprojection_error in both images.
     """
-    raise NotImplementedError("TODO: filter reconstructed points")
+    depth1, depth2 = compute_depths(points3d, R, t)
+    finite_points = np.isfinite(points3d).all(axis=1)
+    positive_depth_mask = (depth1 > 0) & (depth2 > 0)
+    valid_reprojection = (errors1 <= max_reprojection_error) & (errors2 <= max_reprojection_error)
+
+    return finite_points & positive_depth_mask & valid_reprojection
 
 
 def build_2d3d_correspondences(
@@ -260,7 +305,25 @@ def build_2d3d_correspondences(
     - points3d: Nx3 reconstructed 3D points
     - pts_new: Nx2 feature coordinates in the new image
     """
-    raise NotImplementedError("TODO: build 2D-3D correspondences")
+
+    anchor2point3d = {}
+    for anchor_idx, point3d in zip(reconstructed_anchor_indices, reconstructed_points):
+        anchor2point3d[anchor_idx] = point3d
+
+    points3d = []
+    pts_new = []
+    
+    for match in anchor_to_new_matches:
+        anchor_idx = match.queryIdx
+        new_match_idx = match.trainIdx
+
+        if anchor_idx not in anchor2point3d.keys():
+            continue
+
+        points3d.append(anchor2point3d[anchor_idx])
+        pts_new.append(new_keypoints[new_match_idx].pt)
+
+    return np.asarray(points3d), np.asarray(pts_new)
 
 
 def estimate_camera_pose_pnp(
@@ -279,8 +342,26 @@ def estimate_camera_pose_pnp(
     - t: 3x1 world-to-camera translation for the new image
     - inlier_mask: boolean array of shape (N,)
     """
-    raise NotImplementedError("TODO: estimate camera pose with PnP")
 
+    retval, rvec, tvec, inliers = cv2.solvePnPRansac(
+        points3d,
+        pts2d,
+        K,
+        None,
+        reprojectionError=threshold,
+        confidence=confidence
+    )
+
+    inlier_mask = np.zeros(len(points3d), dtype=bool)
+
+    if not retval or inliers is None:
+        return np.eye(3), np.zeros((3, 1)), inlier_mask,
+    
+    R, _ = cv2.Rodrigues(rvec)
+    t = tvec.reshape(3,1)
+
+    inlier_mask[inliers.ravel()] = True
+    return R, t, inlier_mask
 
 def sample_point_colours(image: np.ndarray, pts: np.ndarray) -> np.ndarray:
     if len(pts) == 0:
@@ -322,7 +403,93 @@ def draw_reprojection_overlay(
     This is one of the main ways to check whether your reconstruction is
     geometrically meaningful.
     """
-    raise NotImplementedError("TODO: draw two-view reprojection overlay")
+
+    import matplotlib.pyplot as plt
+    ensure_dir(output_path.parent)
+
+    project1 = project_points(points3d, K, np.eye(3), np.zeros(3))
+    project2 = project_points(points3d, K, R, t)
+
+    image1_rgb = cv2.cvtColor(image1, cv2.COLOR_BGR2RGB)
+    image2_rgb = cv2.cvtColor(image2, cv2.COLOR_BGR2RGB)
+
+    fig, axes = plt.subplots(1, 2, figsize=(14, 7))
+
+    axes[0].imshow(image1_rgb)
+    axes[0].set_title("Image 1 reprojection")
+    axes[0].axis("off")
+
+    axes[1].imshow(image2_rgb)
+    axes[1].set_title("Image 2 reprojection")
+    axes[1].axis("off")    
+
+    n = min(len(points3d), len(pts1), len(pts2))
+
+    indices = list(range(n))
+
+    if len(indices) > max_draw:
+        sample_positions = np.linspace(0, len(indices) - 1, max_draw, dtype=int)
+        indices = np.array(indices, dtype=int)[sample_positions]
+    else:
+        indices = np.array(indices, dtype=int)
+
+    for idx in indices:
+        axes[0].plot(
+            [pts1[idx, 0], project1[idx, 0]],
+            [pts1[idx, 1], project1[idx, 1]],
+            color="yellow",
+            linewidth=0.8,
+            alpha=0.7,
+        )
+
+        axes[1].plot(
+            [pts2[idx, 0], project2[idx, 0]],
+            [pts2[idx, 1], project2[idx, 1]],
+            color="yellow",
+            linewidth=0.8,
+            alpha=0.7,
+        )
+
+    axes[0].scatter(
+        pts1[indices, 0],
+        pts1[indices, 1],
+        s=18,
+        c="lime",
+        marker="o",
+        label="observed",
+    )
+    axes[0].scatter(
+        project1[indices, 0],
+        project1[indices, 1],
+        s=18,
+        c="red",
+        marker="x",
+        label="reprojected",
+    )
+
+    axes[1].scatter(
+        pts2[indices, 0],
+        pts2[indices, 1],
+        s=18,
+        c="lime",
+        marker="o",
+        label="observed",
+    )
+    axes[1].scatter(
+        project2[indices, 0],
+        project2[indices, 1],
+        s=18,
+        c="red",
+        marker="x",
+        label="reprojected",
+    )
+
+    axes[0].legend(loc="lower right")
+    axes[1].legend(loc="lower right")
+
+    plt.tight_layout()
+    plt.savefig(output_path)
+    plt.close(fig)
 
 
 def draw_single_image_reprojection_overlay(
@@ -348,7 +515,60 @@ def draw_single_image_reprojection_overlay(
     This is the corresponding correctness check for the image registered by
     PnP.
     """
-    raise NotImplementedError("TODO: draw single-image reprojection overlay")
+    
+    import matplotlib.pyplot as plt
+
+    ensure_dir(output_path.parent)
+    projected_pts = project_points(points3d, K, R, t)
+    n = min(len(points3d), len(observed_pts), len(projected_pts))
+
+    indices = list(range(n))
+
+    if len(indices) > max_draw:
+        sample_positions = np.linspace(0, len(indices) - 1, max_draw, dtype=int)
+        indices = np.array(indices, dtype=int)[sample_positions]
+    else:
+        indices = np.array(indices, dtype=int)
+
+    image_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+
+    fig, ax = plt.subplots(1, 1, figsize=(8, 8))
+
+    ax.imshow(image_rgb)
+    ax.set_title("Single image reprojection")
+    ax.axis("off")
+
+    for idx in indices:
+        ax.plot(
+            [observed_pts[idx, 0], projected_pts[idx, 0]],
+            [observed_pts[idx, 1], projected_pts[idx, 1]],
+            color="yellow",
+            linewidth=0.8,
+            alpha=0.7,
+        )
+
+    if len(indices) > 0:
+        ax.scatter(
+            observed_pts[indices, 0],
+            observed_pts[indices, 1],
+            s=18,
+            c="lime",
+            marker="o",
+            label="observed",
+        )
+        ax.scatter(
+            projected_pts[indices, 0],
+            projected_pts[indices, 1],
+            s=18,
+            c="red",
+            marker="x",
+            label="reprojected",
+        )
+        ax.legend(loc="lower right")
+
+    plt.tight_layout()
+    plt.savefig(output_path, dpi=200)
+    plt.close(fig)
 
 
 def _camera_center(R: np.ndarray, t: np.ndarray) -> np.ndarray:
