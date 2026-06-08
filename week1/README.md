@@ -287,6 +287,7 @@ Submit an individual report, max **4 pages**, containing:
 
 Practical work is performed in groups of 3, but each student must submit their own report with their own interpretation and analysis.
 
+
 1. **Answer the following questions briefly (2-3 sentences):**
    - Why do multiple views contain more 3D information than a single image?
    - Why are matching and tracking points across images central to SfM?

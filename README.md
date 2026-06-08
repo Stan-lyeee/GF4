@@ -2,8 +2,8 @@
 
 ## Sessions
 
-- 1 June: LR11
-- 4 June: LR11
+- 8 June: LR5
+- 11 June (Presentations): JDB Seminar Room
 
 ## Compulsory Sessions
 
